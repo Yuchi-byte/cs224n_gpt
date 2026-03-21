@@ -29,8 +29,11 @@ class GPT2Layer(nn.Module):
         before it is added to the sub-layer input. WE DO NOT APPLY THE LAYER NORM
         IN THIS FUNCTION.
     """
-    ### YOUR CODE HERE
-    raise NotImplementedError
+    # dense_layer is the linear transformation of attention. 
+    # attention output --> dense_layer --> dropout 
+    # and then combine that with the input to the attention layer (residual connection).
+    x = dropout(dense_layer(output))
+    return input + x 
 
 
   def forward(self, hidden_states, attention_mask):
@@ -41,7 +44,18 @@ class GPT2Layer(nn.Module):
            - Apply dropout, residual connection, and layer normalization according to the plot in the assignment. (Use self.add)
            - A feed-forward layer that applies transformations to further refine the hidden states.
     """
+    # the GPT2 layer consists of two sub-layers: 
+    # layer norm --> attention  --> dropout --> residual connection
+    norm_1 = self.attention_layer_norm(hidden_states)
+    attention_output = self.self_attention(norm_1, attention_mask)
+    hidden_states = self.add(hidden_states, attention_output, self.attention_dense, self.attention_dropout)
+    # the attention_output is a hidden state of the GPT2 layer, which is then fed into the feed-forward layer.
 
-    ### YOUR CODE HERE
-    raise NotImplementedError
+    # layer norm --> feed-forward --> dropout --> residual connection
+    norm_2 = self.out_layer_norm(hidden_states)
+    FNN_output = self.interm_af(self.interm_dense(norm_2))
+    hidden_states = self.add(hidden_states, FNN_output, self.out_dense, self.out_dropout)
+    # the FNN_output is the final hidden state of the GPT2 layer, which is then fed into the next GPT2 layer (if exists) or the output head.
 
+    return hidden_states
+    

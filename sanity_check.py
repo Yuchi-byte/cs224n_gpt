@@ -9,8 +9,11 @@ from utils import model_size_to_params
 
 
 def test_gpt2(model_size='gpt2'):
+  # sent_ids is the sentence. The first sentence has 4 tokens, with the other 4 being zero to represent padding. The second sentence has 8 tokens. 
   sent_ids = torch.tensor([[101, 7592, 2088, 102, 0, 0, 0, 0],
                            [101, 7592, 15756, 2897, 2005, 17953, 2361, 102]])
+  # att_mask is required because the gpt2 doesn't know the value 0 in sent_ids means padding. So att_mask makes the padding explicit, and later we set the 0 values in att_mask to be -inf. 
+  # 1 means keep and 0 means ignore (padding). 
   att_mask = torch.tensor([[1, 1, 1, 1, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1, 1]])
 
   # Load both the OpenAI and your own model.

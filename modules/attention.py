@@ -34,7 +34,49 @@ class CausalSelfAttention(nn.Module):
   def attention(self, key, query, value, attention_mask):
 
     ### YOUR CODE HERE
-    raise NotImplementedError
+
+    # key: Key matrix [bs, num_attention_heads, seq_len, attention_head_size] = [B, H, T, D] (because in forward, we see key_layer in being passed into attentino. And key_layer is the output of self.transform.)
+    # attention_mask: [bs, 1, 1, seq_len] = [B, 1, 1, T]
+    
+    B,H,T,D = key.shape
+    
+    # Score, S = Q * K^T
+    S = torch.matmul(query, key.transpose(-1, -2))
+    A = S / D ** 0.5
+    # A has shape [B, H, T, T] = [2,12,8,8]
+
+
+    # torch.triu returns the upper triangular part of a matrix, the other elements of the result tensor are set to 0. 
+    #mask = torch.triu(torch.ones(T, T, device=query.device), diagonal=1) * -1e10
+    
+
+    causal_mask = torch.triu(
+      torch.ones((T, T), device=A.device, dtype=torch.bool),diagonal=1,
+    )[None, None, :, :]
+    # device = A.device because pyTorch strictly requires A and the mask to be on the same device. By default the device is CPU. If A is on GPU, and we don't specify the device, the mask will be on CPU, and the program crashes.
+    # dtype = torch.bool is the modern best practices for masking. It's compatible with masked_fill, which requires a boolean tensor so it knows which position to overwrite. Using bool (8 bits) compared to float (32 bits) saves significant memory.  
+    # [None, None, :, :] is to make the shape of causal_mask to be [1, 1, T, T] so that it can be broadcasted when added to A which has shape [B, H, T, T].
+
+    # causal_mask has shapre [1,1,T,T] = [1,1,8,8]
+    # causal_mask's uppper triangle has value True, and the rest is False. The upper triangle will be filled with negative infinity. 
+
+
+    A = A.masked_fill(causal_mask, float('-inf')) 
+    # you could do A = A+ causal_mask * -1e10, but it's better to use masked_fill instead. Because masked_fill is incredibly fast, but multiplication requires multiple type convesion. using -inf is also safer. 
+
+    # attention_mask is [B, 1, 1, T] = [2,1,1,8] with 0 for keep and -10000 for masked pads.
+    # attention_mask is already in the form of 0 and -inf (remember when we passed att_mask to gpt2, it was 1 for keep and 0 for padding. This transformation is done in utils.get_extended_attention_mask function. )
+    # Add directly to scores so it broadcasts over heads and query positions.
+    A = A + attention_mask 
+    
+    # shape of A now is [B,H,T,T] = [2,12,8,8]
+
+
+    A = torch.softmax(A, dim=-1)
+    A = self.dropout(A)
+    attn_value = torch.matmul(A, value)
+    attn_value = rearrange(attn_value, 'b h t d -> b t (h d)')
+    return attn_value
 
 
   def forward(self, hidden_states, attention_mask):

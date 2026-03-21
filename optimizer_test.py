@@ -26,7 +26,7 @@ def test_optimizer(opt_class) -> torch.Tensor:
     return model.weight.detach()
 
 if __name__ == '__main__':
-    ref = torch.tensor(np.load("optimizer_test.npy"))
+    ref = torch.tensor(np.load("optimizer_test.npy", allow_pickle=True))
     actual = test_optimizer(AdamW)
     print(ref)
     print(actual)
