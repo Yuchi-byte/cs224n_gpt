@@ -70,9 +70,13 @@ class ParaphraseGPT(nn.Module):
      of 3919) for examples that are not paraphrases.
     """
 
-    'Takes a batch of sentences and produces embeddings for them.'
     ### YOUR CODE HERE
-    raise NotImplementedError
+    # input_ids and attention_mask have shape [batch_size, seq_len] = [B, T]
+    gpt_outputs = self.gpt(input_ids, attention_mask)
+    last_token = gpt_outputs['last_token']  # [B, D]
+    logits = self.paraphrase_detection_head(last_token)  # [B, 2]
+    return logits
+
 
 
 
@@ -92,7 +96,15 @@ def save_model(model, optimizer, args, filepath):
 
 def train(args):
   """Train GPT-2 for paraphrase detection on the Quora dataset."""
-  device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  # device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  if args.use_gpu and torch.cuda.is_available():
+    device = torch.device("cuda")
+  elif args.use_gpu and torch.backends.mps.is_available():
+    device = torch.device("mps")
+  else:
+    device = torch.device("cpu")
+  print(f"Final device selection: {device}")
+
   # Create the data and its corresponding datasets and dataloader.
   para_train_data = load_paraphrase_data(args.para_train)
   para_dev_data = load_paraphrase_data(args.para_dev)
@@ -124,12 +136,23 @@ def train(args):
       b_ids = b_ids.to(device)
       b_mask = b_mask.to(device)
       labels = labels.to(device)
+      # b_ids shape is [8, 353]. labels is [8, label size]
 
       # Compute the loss, gradients, and update the model's parameters.
       optimizer.zero_grad()
-      logits = model(b_ids, b_mask)
+      logits = model(b_ids, b_mask) #tensor([[-4.8905, -2.0438],
+                                            # [-1.0060,  3.1473],
+                                            # [-6.4820, -3.0324],
+                                            # [-6.9410, -4.4138],
+                                            # [-6.4573, -2.6337],
+                                            # [-6.9107, -3.3195],
+                                            # [-6.4667, -2.7219],
+                                            # [-7.7839, -3.4579]], grad_fn=<AddmmBackward0>)
+
+      
       preds = torch.argmax(logits, dim=1)
       loss = F.cross_entropy(logits, labels, reduction='mean')
+      print(f"loss: {loss.item()}")
       loss.backward()
       optimizer.step()
 
@@ -196,7 +219,7 @@ def get_args():
 
   parser.add_argument("--seed", type=int, default=11711)
   parser.add_argument("--epochs", type=int, default=10)
-  parser.add_argument("--use_gpu", action='store_true')
+  parser.add_argument("--use_gpu", action='store_true', default = True)
 
   parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
   parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)

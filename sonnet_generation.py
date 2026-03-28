@@ -59,9 +59,16 @@ class SonnetGPT(nn.Module):
     This is similar to the forward for ParaphraseGPT, but we now want to produce a logit for each token in our sequence;
     not just the last token! This will allow our model to learn the natural language distribution that composes sonnets,
     not just the distribution over next tokens for the last token!
+
+    Instead of creating a new linear layer that learns from random weights to what yes and no mean, 
+    we use the weight typing matrix that already know how to map hidden states to meaningful tokens.
     """
-    ### YOUR CODE HERE
-    raise NotImplementedError
+    outputs = self.gpt(input_ids, attention_mask) # both inputs has shape [B, T] = [8, 178]
+    last_hidden_state = outputs['last_hidden_state']  # [B, T, D] = [8, 178, 768]
+    logits = self.gpt.hidden_state_to_token(last_hidden_state) # [B, T, V] = [8, 178, 50257]
+
+    return logits # logits has shape [b t d]
+
 
 
   def get_device(self):
@@ -131,8 +138,15 @@ def save_model(model, optimizer, args, filepath):
 
 
 def train(args):
-  """Train GPT-2 for paraphrase detection on the Quora dataset."""
-  device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  # device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  if args.use_gpu and torch.cuda.is_available():
+    device = torch.device("cuda")
+  elif args.use_gpu and torch.backends.mps.is_available():
+    device = torch.device("mps")
+  else:
+    device = torch.device("cpu")
+
+
   # Create the data and its corresponding datasets and dataloader.
   sonnet_dataset = SonnetsDataset(args.sonnet_path)
   sonnet_dataloader = DataLoader(sonnet_dataset, shuffle=True, batch_size=args.batch_size,
@@ -157,15 +171,18 @@ def train(args):
     for batch in tqdm(sonnet_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
       # Get the input and move it to the gpu (I do not recommend training this model on CPU).
       b_ids, b_mask = batch['token_ids'], batch['attention_mask']
-      b_ids = b_ids.to(device)
-      b_mask = b_mask.to(device)
+      b_ids = b_ids.to(device) # shape [8, 178] = [B, T]
+      b_mask = b_mask.to(device) # shape [8, 178] = [B, T]
 
       # Compute the loss, gradients, and update the model's parameters.
       optimizer.zero_grad()
-      logits = model(b_ids, b_mask)
+      logits = model(b_ids, b_mask) # logits.shape [8, 178, 50257] = [B, T, D]
       logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')  # Ignore the last prediction in the sequence.
+      # it has shape [1416, 50257] = [B*(T-1), v]
       labels = b_ids[:, 1:].contiguous().flatten()  # Ignore the first token to compose the labels.
-      loss = F.cross_entropy(logits, labels, reduction='mean')
+      # labels shape is [1416]
+      loss = F.cross_entropy(logits, labels, reduction='mean') # this is a scalar. 
+
       loss.backward()
       optimizer.step()
 
@@ -178,6 +195,7 @@ def train(args):
     model.eval()
     for batch in held_out_sonnet_dataset:
       encoding = model.tokenizer(batch[1], return_tensors='pt', padding=True, truncation=True).to(device)
+      # encoding is a dictionary with keys: input_ids and attention_mask. input_ids has shape [1,32], attention_mask has shape [1,32]
       output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)
       print(f'{batch[1]}{output[1]}\n\n')
 
@@ -225,7 +243,7 @@ def get_args():
 
   parser.add_argument("--seed", type=int, default=11711)
   parser.add_argument("--epochs", type=int, default=10)
-  parser.add_argument("--use_gpu", action='store_true')
+  parser.add_argument("--use_gpu", action='store_true', default = True)
 
   # Generation parameters.
   parser.add_argument("--temperature", type=float, help="softmax temperature.", default=1.2)

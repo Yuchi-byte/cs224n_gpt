@@ -44,13 +44,18 @@ class GPT2Model(GPTPreTrainedModel):
     self.init_weights()
 
   def embed(self, input_ids):
+    
     input_shape = input_ids.size()
     seq_length = input_shape[1]
 
+    # input_ids.shape is [B, T] = [8, 178]
     inputs_embeds = self.word_embedding(input_ids)
+    # inputs_embeds shape is [B, T, D] =[8, 178, 768]
 
+    # pos_ids shape is [1, B] = [1, 178]
     pos_ids = self.position_ids[:, :seq_length]
     pos_embeds = self.pos_embedding(pos_ids)
+    # pos_embeds shape is [1, B, D] = [1, 178, 768]
 
     return self.embed_dropout(inputs_embeds + pos_embeds)
 
@@ -88,6 +93,7 @@ class GPT2Model(GPTPreTrainedModel):
     # Get the hidden state of the final token.
     last_non_pad_idx = attention_mask.sum(dim=1) - 1  # Subtract 1 to get last index
     last_token = sequence_output[torch.arange(sequence_output.shape[0]), last_non_pad_idx]
+    # last_token is just the last hidden state of sequence_output. 
 
     return {'last_hidden_state': sequence_output, 'last_token': last_token}
 
@@ -99,8 +105,11 @@ class GPT2Model(GPTPreTrainedModel):
       return hidden_state(s) * E^T
     """ 
 
-    return torch.matmul(hidden_state, self.word_embedding.T)
+    # hidden_state has shape [B, T, D] = [8, 178, 768]
+    #self.word_embedding.weight has shape [V, D] = [50257, 768]
 
+    return torch.matmul(hidden_state, self.word_embedding.weight.T) # this output has shape [B, T, V]
+ 
 
   @classmethod
   def from_pretrained(cls, model='gpt2', d=768, l=12, num_heads=12):

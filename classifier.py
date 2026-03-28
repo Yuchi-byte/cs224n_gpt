@@ -46,17 +46,23 @@ class GPT2SentimentClassifier(torch.nn.Module):
     self.gpt = GPT2Model.from_pretrained()
 
     # Pretrain mode does not require updating GPT paramters.
+    # self.gpt is a tensor that has params. If requires_grad == False, it won't be possible to perform backprogagation on this tensor. Therefore the weights of the tensor won't change. 
+    # Note that we are only specifying requires_grad for the GPT parameters. The classifier parameters will have requires_grad = True by default, so they will be updated during training.
     assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
     for param in self.gpt.parameters():
+      # parameters() is a function of Module 
       if config.fine_tune_mode == 'last-linear-layer':
         param.requires_grad = False
       elif config.fine_tune_mode == 'full-model':
-        param.requires_grad = True
-
+        param.requires_grad = True 
+    
     ### TODO: Create any instance variables you need to classify the sentiment of BERT embeddings.
     ### YOUR CODE HERE
-    raise NotImplementedError
-
+    self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+    self.classifier = torch.nn.Linear(config.hidden_size, self.num_labels) # num_labels is 5 for SST, and 2 for CFIMDB. 
+    # the classifier is a matrix that learns based on training! 
+    # the dropout layer never learns. its behaviour doesn't change with data -- it always picks x% of the values and turn them to zero. 
+    # dropout is performed before classifier linear, because we want the classifier to learn from the masked data (so it can figure out clever ways when some data is missing) so it doesn't become over-reliant on all the data. 
 
   def forward(self, input_ids, attention_mask):
     '''Takes a batch of sentences and returns logits for sentiment classes'''
@@ -65,7 +71,16 @@ class GPT2SentimentClassifier(torch.nn.Module):
     ###       HINT: You should consider what is an appropriate return value given that
     ###       the training loop currently uses F.cross_entropy as the loss function.
     ### YOUR CODE HERE
-    raise NotImplementedError
+
+    # input_ids has shape [B, T]
+    outputs = self.gpt(input_ids, attention_mask)
+    # outputs is a dictionary with keys 'last_hidden_state' and 'last_token'. 
+    last_token = self.dropout(outputs['last_token'])
+    # for CFIMDB, last_token has shape [8, 768] = [B, D] = [batch size, hidden size]. The last token is when I picked the last token for all the 8 sentences (8 batches)
+    logit = self.classifier(last_token)
+    # for CFIMDB, logit has shape [8, num_labels] = [Batch size, binary classification]
+    # logit takes continuous values. We expecte model outputs to be discrete, so later we use np.argmax to turn logits into discrete outputs. 
+    return logit
 
 
 
@@ -173,27 +188,36 @@ def load_data(filename, flag='train'):
 
 # Evaluate the model on dev examples.
 def model_eval(dataloader, model, device):
-  model.eval()  # Switch to eval model, will turn off randomness like dropout.
+  model.eval()  # Switch to eval model, will turn off randomness like dropout. In eval() mode, dropout and layernorm is disabled. 
+  
   y_true = []
   y_pred = []
   sents = []
   sent_ids = []
-  for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
-    b_ids, b_mask, b_labels, b_sents, b_sent_ids = batch['token_ids'], batch['attention_mask'], \
-                                                   batch['labels'], batch['sents'], batch['sent_ids']
+  with torch.no_grad():
+    # it's used commonly tgt with .eval() toggle mode. 
+    # Because eval() doesn't explicitly turn off gradiant calculation to save memory and improve speed, so use torch.no_grad()
 
-    b_ids = b_ids.to(device)
-    b_mask = b_mask.to(device)
+    for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+      b_ids, b_mask, b_labels, b_sents, b_sent_ids = batch['token_ids'], batch['attention_mask'], \
+                                                    batch['labels'], batch['sents'], batch['sent_ids']
 
-    logits = model(b_ids, b_mask)
-    logits = logits.detach().cpu().numpy()
-    preds = np.argmax(logits, axis=1).flatten()
+      b_ids = b_ids.to(device)
+      b_mask = b_mask.to(device)
 
-    b_labels = b_labels.flatten()
-    y_true.extend(b_labels)
-    y_pred.extend(preds)
-    sents.extend(b_sents)
-    sent_ids.extend(b_sent_ids)
+      logits = model(b_ids, b_mask)
+      logits = logits.detach().cpu().numpy()
+      preds = np.argmax(logits, axis=1).flatten()
+      # logits takes continuous values. np.argmax turns those continuous values into discrete classification predicitons, preds. 
+      # np.argmax returns the indices of the max value along an axis. logits.shape is [8,5], so preds.shape is [8]. 
+      # eg. each sentence has 5 continuous values (corresponding to the 5 classifications), and the most likely label is the index with the highest value.
+
+
+      b_labels = b_labels.flatten()
+      y_true.extend(b_labels)
+      y_pred.extend(preds)
+      sents.extend(b_sents)
+      sent_ids.extend(b_sent_ids)
 
   f1 = f1_score(y_true, y_pred, average='macro')
   acc = accuracy_score(y_true, y_pred)
@@ -241,7 +265,18 @@ def save_model(model, optimizer, args, config, filepath):
 
 
 def train(args):
-  device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  # device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  if args.use_gpu:
+    if torch.cuda.is_available():
+      device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+  else:
+      device = torch.device("cpu")
+
+  print(f"Final device selection: {device}")
   # Create the data and its corresponding datasets and dataloader.
   train_data, num_labels = load_data(args.train, 'train')
   dev_data = load_data(args.dev, 'valid')
@@ -272,12 +307,14 @@ def train(args):
 
   # Run for the specified number of epochs.
   for epoch in range(args.epochs):
-    model.train()
+    model.train() # need to switch to the train mode before training. Otherwise, dropout, layernorm, won't work at all. 
     train_loss = 0
     num_batches = 0
     for batch in tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+      # batch is a dictionary with keys ['token_ids', 'attention_mask', 'labels', 'sents', 'sent_ids']
       b_ids, b_mask, b_labels = (batch['token_ids'],
                                  batch['attention_mask'], batch['labels'])
+      # b_ids shape is [8, 353]. b_mask is [8,353]. b_labels is [8].
 
       b_ids = b_ids.to(device)
       b_mask = b_mask.to(device)
@@ -288,6 +325,8 @@ def train(args):
       loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
       loss.backward()
+      # if self.gpt's requires_grad == False, then loss.backward() won't calculate gradient for gpt2. it only calculates grad for classifier. 
+      # and the optimizer will see that gpt2 doesn't have any gradient, so it won't update them. it'd only update the classifier that has gradient.
       optimizer.step()
 
       train_loss += loss.item()
@@ -307,7 +346,27 @@ def train(args):
 
 def test(args):
   with torch.no_grad():
-    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    # device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    if args.use_gpu:
+      if torch.cuda.is_available():
+        device = torch.device("cuda")
+      elif torch.backends.mps.is_available():
+          device = torch.device("mps")
+      else:
+          device = torch.device("cpu")
+    else:
+        device = torch.device("cpu")
+
+    print(f"Final device selection: {device}")
+
+    torch.serialization.add_safe_globals([
+      SimpleNamespace,
+      np._core.multiarray._reconstruct,
+      np.ndarray,
+      np.dtypes.UInt32DType,
+      np.dtype
+    ]) # this code is to make sure torch.load doesn't throw safety error when reading pt file. 
+    # alternative to using torch.serialization, add weights_only = False to torch.load, so that torch is not restricted to unpickling tensor objects. 
     saved = torch.load(args.filepath)
     config = saved['model_config']
     model = GPT2SentimentClassifier(config)
@@ -350,7 +409,8 @@ def get_args():
   parser.add_argument("--fine-tune-mode", type=str,
                       help='last-linear-layer: the GPT parameters are frozen and the task specific head parameters are updated; full-model: GPT parameters are updated as well',
                       choices=('last-linear-layer', 'full-model'), default="last-linear-layer")
-  parser.add_argument("--use_gpu", action='store_true')
+  gpu_available = torch.cuda.is_available() or torch.backends.mps.is_available()
+  parser.add_argument("--use_gpu", action='store_true', default=gpu_available)
 
   parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
   parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
@@ -365,26 +425,26 @@ if __name__ == "__main__":
   args = get_args()
   seed_everything(args.seed)
 
-  print('Training Sentiment Classifier on SST...')
-  config = SimpleNamespace(
-    filepath='sst-classifier.pt',
-    lr=args.lr,
-    use_gpu=args.use_gpu,
-    epochs=args.epochs,
-    batch_size=args.batch_size,
-    hidden_dropout_prob=args.hidden_dropout_prob,
-    train='data/ids-sst-train.csv',
-    dev='data/ids-sst-dev.csv',
-    test='data/ids-sst-test-student.csv',
-    fine_tune_mode=args.fine_tune_mode,
-    dev_out='predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
-    test_out='predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
-  )
+  # print('Training Sentiment Classifier on SST...')
+  # config = SimpleNamespace(
+  #   filepath='sst-classifier.pt',
+  #   lr=args.lr,
+  #   use_gpu=args.use_gpu,
+  #   epochs=args.epochs,
+  #   batch_size=args.batch_size,
+  #   hidden_dropout_prob=args.hidden_dropout_prob,
+  #   train='data/ids-sst-train.csv',
+  #   dev='data/ids-sst-dev.csv',
+  #   test='data/ids-sst-test-student.csv',
+  #   fine_tune_mode=args.fine_tune_mode,
+  #   dev_out='predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
+  #   test_out='predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
+  # )
 
-  train(config)
+  # train(config)
 
-  print('Evaluating on SST...')
-  test(config)
+  # print('Evaluating on SST...')
+  # test(config)
 
   print('Training Sentiment Classifier on cfimdb...')
   config = SimpleNamespace(
@@ -402,7 +462,17 @@ if __name__ == "__main__":
     test_out='predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
   )
 
-  train(config)
 
-  print('Evaluating on cfimdb...')
-  test(config)
+  train(config)
+  # we get Epoch 0: train loss :: 0.686, train acc :: 0.665, dev acc :: 0.653
+
+  # print('Evaluating on cfimdb...')
+  # test(config)
+
+
+cfimdb_training_history = {
+    "epoch": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "train_loss": [0.709, 0.558, 0.523, 0.506, 0.466, 0.457, 0.471, 0.453, 0.454, 0.478],
+    "train_acc": [0.745, 0.818, 0.734, 0.855, 0.845, 0.847, 0.869, 0.864, 0.881, 0.878],
+    "dev_acc": [0.747, 0.816, 0.710, 0.829, 0.837, 0.841, 0.853, 0.841, 0.853, 0.865]
+}
